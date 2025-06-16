@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Receiver</title>
+  <style>
+    /* Que el video ocupe toda la ventana */
+    html, body {
+      margin: 0; padding: 0; height: 100%; width: 100%; background: black;
+      display: flex; justify-content: center; align-items: center;
+    }
+    video {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      background: black;
+    }
+  </style>
+</head>
+<body>
+  <video autoplay playsinline controls></video>
+
+  <script>
+    const video = document.querySelector('video');
+    const pc = new RTCPeerConnection();
+
+    const ws = new WebSocket("ws://localhost:8080");
+
+    ws.onopen = () => {
+      console.log("✅ WebSocket conectado");
+      ws.send(JSON.stringify({ type: "receiver" }));
+    };
+
+    ws.onmessage = async ({ data }) => {
+      console.log("📩 Mensaje recibido:", data);
+      try {
+        const msg = JSON.parse(data);
+        if (msg.offer) {
+          console.log("[PC] Recibiendo oferta");
+          await pc.setRemoteDescription(new RTCSessionDescription(msg.offer));
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          ws.send(JSON.stringify({ answer }));
+        } else if (msg.candidate) {
+          console.log("[PC] Recibiendo candidato ICE");
+          await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+        }
+      } catch (e) {
+        console.error("[PC] Error procesando mensaje:", e);
+      }
+    };
+
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        ws.send(JSON.stringify({ candidate: event.candidate }));
+      }
+    };
+
+    pc.ontrack = (event) => {
+      console.log("[PC] Recibiendo track");
+      video.srcObject = event.streams[0];
+      video.play().catch(e => {
+        console.warn("No se pudo reproducir automáticamente:", e);
+      });
+    };
+  </script>
+</body>
+</html>
