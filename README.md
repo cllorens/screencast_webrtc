@@ -73,7 +73,7 @@ Open `receiver.html` in another browser window, tab, or device on the same netwo
 
 ## 👤 Credits
 
-This project was developed by **[Your Name]**, with the **invaluable assistance of ChatGPT** by [OpenAI](https://openai.com).  
+This project was developed by **Carlos Llorens**, with the **invaluable assistance of ChatGPT** by [OpenAI](https://openai.com).  
 ChatGPT contributed ideas, code structure, debugging strategies, and helped shape the project from concept to completion.
 
 ---
