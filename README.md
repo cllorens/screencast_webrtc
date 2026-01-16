@@ -1,83 +1,173 @@
-# WebRTC Screen Sharing via WebSocket Signaling
+# WebRTC Screen Sharing (HTTPS + Kiosk Receiver)
 
-This project demonstrates how to share your screen from one browser to another using WebRTC, with a simple WebSocket signaling server.
+This project provides a **minimal, self‑hosted WebRTC screen sharing solution** using:
 
-It consists of:
+- WebRTC for media transport  
+- Secure WebSocket (WSS) for signaling  
+- HTTPS with certificates  
+- Automatic Chrome **kiosk mode** for the receiver display
 
-- `sender.html`: Captures and sends your screen.
-- `receiver.html`: Receives and displays the screen (fullscreen).
-- `server.js`: A WebSocket signaling server that facilitates the exchange of WebRTC negotiation messages.
+It is designed to work reliably **locally and across devices**, including remote senders, as long as HTTPS is used.
+
+---
+
+## 📦 Project Overview
+
+The system consists of:
+
+- **Sender (`index.html`)**  
+  Captures and shares the screen using WebRTC.
+
+- **Receiver (`receiver.html`)**  
+  Receives and displays the shared screen fullscreen.  
+  This page is automatically opened in **Chrome kiosk mode** by the server.
+
+- **Server (`server.js`)**  
+  - Serves files over **HTTPS (port 443)**  
+  - Redirects HTTP → HTTPS (port 80)  
+  - Hosts a **secure WebSocket signaling server (WSS)**  
+  - Automatically launches Chrome in kiosk mode  
+  - Exits cleanly when Chrome is closed (Alt+F4)
 
 ---
 
 ## 🔧 How It Works
 
-1. The sender opens a WebSocket connection and identifies itself.
-2. It captures the screen and creates an offer (SDP).
-3. The receiver connects, responds with an answer.
-4. ICE candidates are exchanged over the WebSocket connection.
-5. Once connected, the receiver shows the shared screen in real time.
+1. `server.js` starts:
+   - HTTPS server on **443**
+   - HTTP redirect on **80**
+   - WSS signaling on **443**
+   - Launches Chrome in **kiosk mode** pointing to the receiver page
+
+2. The **receiver**:
+   - Connects to the WSS server
+   - Waits for a sender
+   - Displays the incoming screen stream fullscreen
+
+3. The **sender**:
+   - Opens `https://<server-host>/`
+   - Captures the screen using `getDisplayMedia`
+   - Negotiates WebRTC via WSS
+
+4. Once ICE negotiation succeeds:
+   - Media flows **peer‑to‑peer**
+   - The server is no longer in the media path
 
 ---
 
-## 📦 Files Included
+## 🔐 HTTPS & Certificates (Required)
 
-- `sender.html`
-- `receiver.html`
-- `server.js` (signaling server in Node.js)
+WebRTC **requires HTTPS** when used across devices.
+
+This project uses **real or self‑signed certificates**.
+
+### Required certificate files
+
+Place these next to `server.js`:
+
+```
+certificado.pem   # public certificate (PEM)
+certificado.key   # private key
+```
+
+They are loaded directly by Node.js.
+
+Certificates can be:
+- Self‑signed (for testing)
+- Issued by a CA (HARICA, Let’s Encrypt, etc.)
 
 ---
 
 ## ▶️ Running the Project
 
-### 1. Clone or download the project
-
-Place the following files in a single directory:
-
-- `sender.html`
-- `receiver.html`
-- `server.js`
-
-### 2. Install dependencies
-
-You’ll need Node.js installed. Then run:
+### 1. Install dependencies
 
 ```bash
 npm install ws
 ```
 
-### 3. Start the signaling server
+### 2. Start the server
 
 ```bash
 node server.js
 ```
 
-This starts a WebSocket server on `ws://localhost:8080`.
-
-### 4. Open the sender
-
-Open `sender.html` in a browser (Chrome or Firefox recommended), and allow screen sharing when prompted.
-
-### 5. Open the receiver
-
-Open `receiver.html` in another browser window, tab, or device on the same network.
+This will:
+- Start HTTPS and WSS
+- Launch Chrome in kiosk mode
+- Exit Node.js automatically when Chrome is closed
 
 ---
 
-## 🌐 Notes
+## 🌐 Accessing the Pages
 
-- To test across devices, replace `localhost` in the WebSocket URL with your computer’s local IP address.
-- Some browsers block `file://` WebRTC access — serve files using a local web server if needed (e.g. `npx serve .`).
+### Sender (screen capture)
+
+Open in any modern browser:
+
+```
+https://<server-host>/
+```
+
+Examples:
+- Desktop Chrome / Chromium
+- Linux Chromium
+- Android Chrome (screen capture depends on Android version)
+
+### Receiver
+
+Automatically opened by the server in **Chrome kiosk mode**:
+
+```
+https://<server-host>/receiver.html
+```
+
+---
+
+## 🧭 Chrome Kiosk Mode
+
+When `server.js` starts:
+
+- Existing Chrome processes are closed
+- Chrome is launched with:
+  - `--kiosk`
+  - `--start-fullscreen`
+  - Dedicated user profile
+- When Chrome is closed (**Alt+F4**):
+  - `server.js` exits automatically
+
+This makes the system suitable for:
+- Permanent displays
+- Projectors
+- Digital signage
+- Demo setups
+
+---
+
+## 📱 Android Notes
+
+- WebRTC works in Android Chrome
+- Screen capture availability depends on Android version and permissions
+- HTTPS is mandatory
+- Receiver kiosk mode is intended for desktop Chrome
 
 ---
 
 ## 👤 Credits
 
-This project was developed by **Carlos Llorens**, with the **invaluable assistance of ChatGPT** by [OpenAI](https://openai.com).  
-ChatGPT contributed ideas, code structure, debugging strategies, and helped shape the project from concept to completion.
+This project was developed by the author with the **invaluable assistance of ChatGPT (OpenAI)**.
+
+ChatGPT contributed significantly to:
+- WebRTC signaling design
+- ICE / WSS debugging
+- HTTPS and certificate integration
+- Chrome kiosk automation
+- Cross‑platform troubleshooting
+- Code refinement and documentation
 
 ---
 
 ## 📝 License
 
 MIT License
+

@@ -4,65 +4,224 @@
   <meta charset="UTF-8" />
   <title>Receiver</title>
   <style>
-    /* Que el video ocupe toda la ventana */
-    html, body {
-      margin: 0; padding: 0; height: 100%; width: 100%; background: black;
-      display: flex; justify-content: center; align-items: center;
+    html, body { margin:0; padding:0; height:100%; width:100%; background:black; overflow:hidden; }
+    video { width:100%; height:100%; object-fit:contain; background:black; }
+
+    #overlay{
+      position:fixed; inset:0; display:flex;
+      align-items:center; justify-content:center;
+      background:rgba(0,0,0,0.85); color:#fff; z-index:9999;
+      font-family:system-ui, Arial, sans-serif;
     }
-    video {
-      width: 100%;
-      height: 100%;
-      object-fit: contain;
-      background: black;
+    #overlay .box{
+      max-width:900px; width:calc(100% - 40px);
+      padding:22px; border:1px solid rgba(255,255,255,0.15);
+      border-radius:14px; background:rgba(20,20,20,0.75);
+      display:grid; grid-template-columns:1fr 260px; gap:18px; align-items:center;
+    }
+    #overlay h1{ margin:0 0 10px 0; font-size:22px; font-weight:650; }
+    #overlay .hint{ opacity:.9; margin:0 0 12px 0; line-height:1.35; }
+    #overlay .row{ margin:10px 0; }
+    #overlay .label{ opacity:.75; font-size:12px; margin-bottom:6px; }
+    #overlay .url{
+      display:inline-block; padding:8px 10px; border-radius:10px;
+      background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.12);
+      font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      word-break:break-all;
+    }
+    #overlay .status{
+      opacity:.8; font-size:12px; margin-top:12px; white-space:pre-wrap;
+      font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    #qr{
+      width:260px; height:260px; display:grid; place-items:center;
+      background:#fff; border-radius:12px; overflow:hidden;
+    }
+    #qr canvas{ width:100% !important; height:100% !important; }
+    @media (max-width:760px){
+      #overlay .box{ grid-template-columns:1fr; }
+      #qr{ width:220px; height:220px; margin:0 auto; }
     }
   </style>
 </head>
 <body>
-  <video autoplay playsinline controls></video>
+  <video autoplay playsinline muted controls></video>
 
+  <div id="overlay">
+    <div class="box">
+      <div>
+        <h1 id="title">Waiting for a sender…</h1>
+        <p class="hint">Open this URL on the device that will share the screen:</p>
+
+        <div class="row">
+          <div class="label">Sender URL</div>
+          <div class="url" id="senderUrl"></div>
+        </div>
+
+        <div class="row">
+          <div class="label"><b><h1>ATL+F4 to exit</h1></b></div>
+        </div>
+
+        <div class="status" id="status"></div>
+      </div>
+
+      <div>
+        <div class="label">QR (Sender URL)</div>
+        <div id="qr"></div>
+      </div>
+    </div>
+  </div>
+
+<script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
   <script>
-    const video = document.querySelector('video');
-    const pc = new RTCPeerConnection();
+    window.addEventListener("error", (e) => console.error("[window.error]", e.error || e.message));
+    window.addEventListener("unhandledrejection", (e) => console.error("[unhandledrejection]", e.reason));
 
-    const ws = new WebSocket("ws://localhost:8080");
+
+    const video = document.querySelector("video");
+    const overlay = document.getElementById("overlay");
+    const titleEl = document.getElementById("title");
+    const senderUrlEl = document.getElementById("senderUrl");
+    //const receiverUrlEl = document.getElementById("receiverUrl");
+    const statusEl = document.getElementById("status");
+    const qrEl = document.getElementById("qr");
+
+    const base = `${window.location.protocol}//${window.location.host}`;
+    //const receiverUrl = `${base}/receiver.html`;
+    const senderUrl = `${base}`;
+
+    senderUrlEl.textContent = senderUrl;
+    //receiverUrlEl.textContent = receiverUrl;
+
+    // QR del sender
+    (function renderQR() {
+      qrEl.innerHTML = "";
+      if (!window.QRCode) return;
+      QRCode.toCanvas(senderUrl, { margin: 1, width: 260 }, (err, canvas) => {
+        if (err) console.error("[QR] error:", err);
+        else qrEl.appendChild(canvas);
+      });
+    })();
+
+    // --- Auto reload (evita bucle con cooldown)
+    const RELOAD_COOLDOWN_MS = 4000;
+    const lastReload = Number(sessionStorage.getItem("lastReloadTs") || "0");
+
+    function scheduleReload(reason) {
+      const now = Date.now();
+      const since = now - lastReload;
+
+      titleEl.textContent = `Disconnected (${reason}). Reloading…`;
+      overlay.style.display = "flex";
+
+      if (since < RELOAD_COOLDOWN_MS) {
+        // Si se ha recargado hace nada, espera un poco más
+        const wait = RELOAD_COOLDOWN_MS - since;
+        statusEl.textContent = `Reload cooldown active (${wait}ms)…`;
+        setTimeout(() => doReload(reason), wait);
+      } else {
+        setTimeout(() => doReload(reason), 800);
+      }
+    }
+
+    function doReload(reason) {
+      sessionStorage.setItem("lastReloadTs", String(Date.now()));
+      // Cache-buster para evitar servir algo cacheado en kiosk
+      const u = new URL(window.location.href);
+      u.searchParams.set("r", Date.now().toString());
+      window.location.replace(u.toString());
+    }
+
+    function setStatus(extra="") {
+      statusEl.textContent =
+        `WS: ${ws.readyState === 0 ? "CONNECTING" : ws.readyState === 1 ? "OPEN" : ws.readyState === 2 ? "CLOSING" : "CLOSED"}\n` +
+        `PC: connection=${pc.connectionState} ice=${pc.iceConnectionState} signaling=${pc.signalingState}\n` +
+        extra;
+    }
+
+    // WebRTC
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+    });
+
+    pc.oniceconnectionstatechange = () => {
+      console.log("[PC] ice =", pc.iceConnectionState);
+      setStatus();
+      if (pc.iceConnectionState === "failed" || pc.iceConnectionState === "disconnected") {
+        scheduleReload("ICE " + pc.iceConnectionState);
+      }
+    };
+
+    pc.onconnectionstatechange = () => {
+      console.log("[PC] conn =", pc.connectionState);
+      setStatus();
+      if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+        scheduleReload("PC " + pc.connectionState);
+      }
+    };
+
+    pc.onicecandidate = (e) => {
+      if (e.candidate) ws.send(JSON.stringify({ candidate: e.candidate }));
+    };
+
+    pc.ontrack = (e) => {
+      console.log("[PC] track received");
+      overlay.style.display = "none";
+      titleEl.textContent = "Waiting for a sender…";
+      video.srcObject = e.streams[0];
+      video.play().catch(err => console.warn("[VIDEO] autoplay blocked:", err));
+      setStatus("Streaming…");
+    };
+
+    // WebSocket
+    const wsUrl = `wss://${window.location.host}`;
+    const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
-      console.log("✅ WebSocket conectado");
+      console.log("✅ [WS] connected");
       ws.send(JSON.stringify({ type: "receiver" }));
+      titleEl.textContent = "Waiting for a sender…";
+      overlay.style.display = "flex";
+      setStatus();
+    };
+
+    ws.onerror = (e) => {
+      console.error("❌ [WS] error:", e);
+      setStatus("WS error");
+    };
+
+    ws.onclose = (e) => {
+      console.warn("⚠️ [WS] closed:", e.code, e.reason);
+      setStatus(`WS closed: ${e.code} ${e.reason || ""}`);
+      scheduleReload("WS closed");
     };
 
     ws.onmessage = async ({ data }) => {
-      console.log("📩 Mensaje recibido:", data);
+      let msg;
+      try { msg = JSON.parse(data); }
+      catch (e) { console.error("❌ [WS] invalid JSON:", e); return; }
+
       try {
-        const msg = JSON.parse(data);
         if (msg.offer) {
-          console.log("[PC] Recibiendo oferta");
-          await pc.setRemoteDescription(new RTCSessionDescription(msg.offer));
+          console.log("[PC] offer received");
+          await pc.setRemoteDescription(msg.offer);
           const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
-          ws.send(JSON.stringify({ answer }));
+          ws.send(JSON.stringify({ answer: pc.localDescription }));
         } else if (msg.candidate) {
-          console.log("[PC] Recibiendo candidato ICE");
-          await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+          await pc.addIceCandidate(msg.candidate);
         }
       } catch (e) {
-        console.error("[PC] Error procesando mensaje:", e);
+        console.error("❌ [PC] signaling error:", e);
+        scheduleReload("signaling error");
+      } finally {
+        setStatus();
       }
     };
 
-    pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        ws.send(JSON.stringify({ candidate: event.candidate }));
-      }
-    };
-
-    pc.ontrack = (event) => {
-      console.log("[PC] Recibiendo track");
-      video.srcObject = event.streams[0];
-      video.play().catch(e => {
-        console.warn("No se pudo reproducir automáticamente:", e);
-      });
-    };
+    // Inicial: overlay visible
+    overlay.style.display = "flex";
+    setStatus();
   </script>
 </body>
 </html>

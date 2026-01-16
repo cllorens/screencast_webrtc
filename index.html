@@ -1,8 +1,283 @@
 <!DOCTYPE html>
 <html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Sender</title>
+  <style>
+    body { font-family: sans-serif; }
+    video { width: 640px; max-width: 100%; border: 1px solid #ccc; }
+    .row { margin: 8px 0; }
+    .warn { color: #b45309; }
+    .ok { color: #166534; }
+    .err { color: #b91c1c; }
+  </style>
+</head>
 <body>
-  <h2>Compartir pantalla</h2>
-  <a href="sender.html">Enviar pantalla</a> |
-  <a href="receiver.html">Ver pantalla</a>
+  <h1>Sender</h1>
+
+  <div class="row">
+    <button id="startBtn">Start sharing</button>
+    <button id="stopBtn" disabled>Stop</button>
+  </div>
+
+  <div class="row">
+    <label>
+      Source:
+      <select id="sourceSelect">
+        <option value="auto" selected>Auto (screen if possible, else camera)</option>
+        <option value="screen">Screen</option>
+        <option value="camera">Camera</option>
+      </select>
+    </label>
+  </div>
+
+  <div class="row" id="info"></div>
+
+  <video autoplay playsinline muted controls></video>
+
+  <script>
+    // ---- Global error visibility (remote machines often fail silently otherwise)
+    window.addEventListener("error", (e) => {
+      console.error("[window.error]", e.error || e.message);
+    });
+    window.addEventListener("unhandledrejection", (e) => {
+      console.error("[unhandledrejection]", e.reason);
+    });
+
+    const infoEl = document.getElementById("info");
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const sourceSelect = document.getElementById("sourceSelect");
+    const video = document.querySelector("video");
+
+    function setInfo(text, cls) {
+      infoEl.className = cls || "";
+      infoEl.textContent = text;
+    }
+
+    console.log("[PAGE] Loaded. location.href =", window.location.href);
+    console.log("[PAGE] host =", window.location.host);
+    console.log("[PAGE] isSecureContext =", window.isSecureContext);
+    console.log("[PAGE] mediaDevices =", !!navigator.mediaDevices);
+    console.log("[PAGE] getDisplayMedia =", !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia));
+    console.log("[PAGE] getUserMedia =", !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia));
+
+    // ---- WebSocket (must point to SERVER host, never hardcode localhost for remote clients)
+    const wsUrl = `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}`;
+    console.log("[WS] Connecting to", wsUrl);
+    setInfo(`WS: ${wsUrl}`, "warn");
+
+    const ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+      console.log("✅ [WS] Connected");
+      ws.send(JSON.stringify({ type: "sender" }));
+      setInfo(`WS connected: ${wsUrl}`, "ok");
+    };
+
+    ws.onerror = (err) => {
+      console.error("❌ [WS] Error", err);
+      setInfo(`WS error (see console).`, "err");
+    };
+
+    ws.onclose = (ev) => {
+      console.warn("⚠️ [WS] Closed", ev.code, ev.reason);
+      setInfo(`WS closed: ${ev.code} ${ev.reason || ""}`, "err");
+    };
+
+    // ---- WebRTC
+    let pc = null;
+    let stream = null;
+
+    function createPeerConnection() {
+      const p = new RTCPeerConnection({
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+      });
+
+      p.onconnectionstatechange = () => {
+        console.log("[PC] connectionState =", p.connectionState);
+      };
+      p.oniceconnectionstatechange = () => {
+        console.log("[PC] iceConnectionState =", p.iceConnectionState);
+      };
+      p.onsignalingstatechange = () => {
+        console.log("[PC] signalingState =", p.signalingState);
+      };
+      p.onicegatheringstatechange = () => {
+        console.log("[PC] iceGatheringState =", p.iceGatheringState);
+      };
+      p.onicecandidate = (event) => {
+        if (event.candidate) {
+          console.log("[PC] ICE candidate -> WS", event.candidate.candidate);
+          ws.send(JSON.stringify({ candidate: event.candidate }));
+        } else {
+          console.log("[PC] ICE candidate gathering complete (null candidate)");
+        }
+      };
+
+      return p;
+    }
+
+    // Optional: periodic stats to see if bytes are flowing
+    setInterval(async () => {
+      if (!pc || pc.connectionState !== "connected") return;
+      const stats = await pc.getStats();
+      let out = null;
+      stats.forEach(r => {
+        if (r.type === "outbound-rtp" && r.kind === "video") out = r;
+      });
+      if (out) {
+        console.log("[STATS] outbound video bytesSent=", out.bytesSent, "framesEncoded=", out.framesEncoded);
+      }
+    }, 2000);
+
+    ws.onmessage = async ({ data }) => {
+      console.log("📩 [WS] Message received:", data);
+      let msg;
+      try {
+        msg = JSON.parse(data);
+      } catch (e) {
+        console.error("❌ [WS] JSON parse error:", e);
+        return;
+      }
+
+      try {
+        if (msg.answer) {
+          console.log("[PC] Setting remote description (answer)...");
+          await pc.setRemoteDescription(new RTCSessionDescription(msg.answer));
+          console.log("[PC] Remote description set");
+        } else if (msg.candidate) {
+          console.log("[PC] Adding ICE candidate from remote...");
+          await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+          console.log("[PC] ICE candidate added");
+        }
+      } catch (e) {
+        console.error("❌ [PC] Error applying signaling message:", e);
+      }
+    };
+
+    function pickSourceMode() {
+      const mode = sourceSelect.value;
+      if (mode !== "auto") return mode;
+
+      // Auto: prefer screen if available, else camera
+      if (navigator.mediaDevices && typeof navigator.mediaDevices.getDisplayMedia === "function") return "screen";
+      return "camera";
+    }
+
+    async function getMediaStream(mode) {
+      if (!navigator.mediaDevices) {
+        throw new Error("navigator.mediaDevices is not available. Use HTTPS (secure context).");
+      }
+
+      if (mode === "screen") {
+        if (typeof navigator.mediaDevices.getDisplayMedia !== "function") {
+          throw new Error("Screen capture (getDisplayMedia) is not supported on this device/browser (common on Android).");
+        }
+        console.log("[MEDIA] Requesting display capture...");
+        return await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+      }
+
+      // camera
+      if (typeof navigator.mediaDevices.getUserMedia !== "function") {
+        throw new Error("Camera capture (getUserMedia) is not supported on this device/browser.");
+      }
+      console.log("[MEDIA] Requesting camera capture...");
+      return await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment" }, // back camera by default on phones
+        audio: false
+      });
+    }
+
+    async function startSharing() {
+      if (ws.readyState !== WebSocket.OPEN) {
+        console.warn("[APP] WS not open yet. state=", ws.readyState);
+        setInfo("WebSocket not connected yet. Wait a second and try again.", "warn");
+        return;
+      }
+
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      sourceSelect.disabled = true;
+
+      try {
+        // Fresh PC each time (more reliable across devices)
+        if (pc) { try { pc.close(); } catch {} }
+        pc = createPeerConnection();
+
+        const mode = pickSourceMode();
+        setInfo(`Starting (${mode})...`, "warn");
+
+        stream = await getMediaStream(mode);
+        console.log("[MEDIA] Got stream. tracks=", stream.getTracks().map(t => `${t.kind}:${t.label}`));
+
+        // Show locally
+        video.srcObject = stream;
+
+        // Stop handling if user stops sharing from browser UI
+        stream.getTracks().forEach(track => {
+          track.onended = () => {
+            console.warn("[MEDIA] Track ended (user stopped).");
+            stopSharing();
+          };
+        });
+
+        // Add tracks to peer connection
+        stream.getTracks().forEach(track => pc.addTrack(track, stream));
+
+        console.log("[PC] Creating offer...");
+        const offer = await pc.createOffer();
+        console.log("[PC] Offer created. Setting local description...");
+        await pc.setLocalDescription(offer);
+        console.log("[PC] Local description set. Sending offer over WS...");
+        ws.send(JSON.stringify({ offer: pc.localDescription }));
+        console.log("[WS] Offer sent.");
+
+        setInfo(`Sharing started (${mode}).`, "ok");
+      } catch (err) {
+        console.error("❌ [MEDIA/PC] Failed to start:", err);
+
+        // Helpful Android hint
+        const isAndroid = /Android/i.test(navigator.userAgent);
+        if (isAndroid && String(err).includes("getDisplayMedia")) {
+          setInfo("Android: screen share is often not supported in the browser. Use Source: Camera, or share from a PC.", "err");
+        } else {
+          setInfo(String(err.message || err), "err");
+        }
+
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+        sourceSelect.disabled = false;
+      }
+    }
+
+    function stopSharing() {
+      try {
+        if (stream) {
+          stream.getTracks().forEach(t => t.stop());
+          stream = null;
+        }
+        if (pc) {
+          try { pc.close(); } catch {}
+          pc = null;
+        }
+        video.srcObject = null;
+      } finally {
+        stopBtn.disabled = true;
+        startBtn.disabled = false;
+        sourceSelect.disabled = false;
+        console.log("[APP] Sharing stopped.");
+        setInfo("Stopped.", "warn");
+      }
+    }
+
+    startBtn.addEventListener("click", startSharing);
+    stopBtn.addEventListener("click", stopSharing);
+
+    // Small hint if not secure (common cause on phones)
+    if (!window.isSecureContext) {
+      setInfo("Warning: Not a secure context. On many browsers (especially mobile), capture APIs require HTTPS.", "warn");
+    }
+  </script>
 </body>
 </html>
