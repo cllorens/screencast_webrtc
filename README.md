@@ -9,6 +9,23 @@ solo el navegador. No hay que instalar nada en los portátiles.
   del navegador. La imagen y el audio van directamente del portátil al proyector (WebRTC).
   El servidor solo intercambia los mensajes iniciales.
 
+Pensado para proyectores de aula, pantallas permanentes, cartelería y demos.
+
+## Cómo funciona
+
+1. `server.js` arranca:
+   - HTTPS en el puerto **443**, con señalización WSS en el mismo puerto.
+   - Redirección HTTP → HTTPS en el **80**.
+   - Chrome en **modo kiosko** con `receiver.html`.
+2. El **receptor** se conecta por WSS, se registra con el token que le pasa el servidor y
+   espera, mostrando la URL y el QR.
+3. El **emisor** abre `https://<equipo>.gnd.upv.es/`. Al pulsar *Start*, captura la
+   pantalla con `getDisplayMedia` y negocia la conexión WebRTC a través del WSS.
+4. Cuando ICE conecta, la imagen y el audio van **de igual a igual (P2P)** entre el portátil y el
+   proyector. El servidor ya no está en el camino de los datos.
+5. Si se corta la conexión, los dos lados se reconectan y renegocian solos. Al cerrar el
+   kiosko (Alt+F4), el servidor también se cierra.
+
 ## Contenido de la carpeta
 
 ```
@@ -145,6 +162,13 @@ Después abre `https://<equipo>.gnd.upv.es/receiver.html?token=prueba` en una ve
 - **Los portátiles no cargan la página:** revisa la regla del firewall.
 - **La página carga pero no llega imagen:** mira la consola del navegador (F12) en el
   portátil. Las líneas `[PC]` muestran el estado de la conexión WebRTC.
+
+## Créditos
+
+Desarrollado por el autor con la ayuda de **ChatGPT (OpenAI)** en la versión inicial
+(diseño de la señalización, depuración de ICE/WSS, HTTPS y kiosko) y de **Claude (Anthropic)** en la
+versión 2. Claude hizo la revisión de seguridad, la reconexión y renegociación automáticas,
+los certificados por equipo, las pruebas y la documentación.
 
 ## Licencia
 
