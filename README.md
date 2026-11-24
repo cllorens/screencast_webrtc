@@ -32,6 +32,7 @@ Pensado para proyectores de aula, pantallas permanentes, cartelería y demos.
 server.js             Servidor HTTPS (443) + redirección HTTP (80) + señalización WSS + lanzador del kiosko
 index.html            Página del emisor (portátil)
 receiver.html         Página del receptor (kiosko del proyector)
+kiosk-display.js      Elige la pantalla del kiosko (con 2+ pantallas, la secundaria)
 vendor/qrcode.min.js  Librería del QR (qrcode 1.5.1), servida localmente
 start.cmd             Arranque con doble clic (ventana minimizada)
 test/server.test.js   Pruebas del servidor (npm test)
@@ -62,6 +63,14 @@ Para arrancarlo, cualquier usuario (no hace falta que sea administrador):
 
 Al arrancar, el servidor cierra los Chrome abiertos del usuario y abre el kiosko en
 `https://<equipo>.gnd.upv.es/receiver.html`.
+
+**Pantalla del kiosko:**
+- Con una sola pantalla, el kiosko va en ella.
+- Con **dos o más**, va en la que **no es la principal**. Con el proyector en modo
+  *Extender*, es la "Pantalla 2".
+- Para forzar otra, usa `KIOSK_DISPLAY=primary`, o `KIOSK_DISPLAY=1`, `2`… (contando de
+  izquierda a derecha).
+- Para ver qué pantallas detecta un PC: `node kiosk-display.js`.
 
 ## Uso desde el portátil
 
@@ -129,6 +138,7 @@ en *Entidades de certificación raíz de confianza* del portátil.
 | `CERT_KEY`       | `<equipo>/privateKey.pem`                | Clave privada                             |
 | `CERT_PEM`       | `<equipo>/Cert_bundle.pem`               | Certificado                               |
 | `CERT_PASS_FILE` | `pass.txt` junto a la clave              | Contraseña de la clave cifrada            |
+| `KIOSK_DISPLAY`  | `auto` (secundaria si hay 2+)            | `primary` o número de pantalla (1, 2…, de izquierda a derecha) |
 | `HTTPS_PORT`     | `443`                                    | Puerto HTTPS/WSS                          |
 | `HTTP_PORT`      | `80`                                     | Puerto de redirección HTTP                |
 | `NO_KIOSK`       | —                                        | `1` = no cierra ni abre Chrome (pruebas)  |

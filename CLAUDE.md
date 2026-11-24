@@ -8,9 +8,14 @@ Ver README.md para el despliegue.
 
 - `server.js`: HTTPS 443 + redirección HTTP 80 + señalización WSS en el mismo puerto + lanzador de Chrome en kiosko. Se cierra cuando se cierra Chrome.
 - `index.html`: emisor (portátil). `receiver.html`: receptor (kiosko).
+- `kiosk-display.js`: elige la pantalla del kiosko.
+  - Lista los monitores con PowerShell (`System.Windows.Forms.Screen`, proceso DPI-aware).
+  - Con 2+ pantallas elige la no principal; se puede cambiar con `KIOSK_DISPLAY`.
+  - Pasa a Chrome `--window-position` y `--window-size` (una ventana de 800x600 centrada en la pantalla elegida), y `--kiosk` la pone a pantalla completa en ese monitor.
+  - Los números `\\.\DISPLAYn` de Windows no son fiables (aquí sale DISPLAY225), así que las pantallas se ordenan por posición.
 - `vendor/qrcode.min.js`: qrcode 1.5.1 servido localmente (no usar CDN).
 - `<equipo>/` (cdavid, radio7, D214): `privateKey.pem`, `Cert_bundle.pem` y, opcionalmente, `pass.txt`. **Son secretos.**
-- `test/server.test.js`: pruebas del servidor, se ejecutan con `npm test`.
+- `test/`: pruebas del servidor y de la elección de pantalla, se ejecutan con `npm test`.
 
 ## Reglas importantes
 

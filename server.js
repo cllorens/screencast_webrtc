@@ -6,6 +6,7 @@ const crypto = require("crypto");
 const WebSocket = require("ws");
 const os = require("os");
 const { exec, spawn } = require("child_process");
+const { kioskDisplayArgs } = require("./kiosk-display");
 
 // ---- Configuración según el PC (sobrescribible con variables de entorno)
 // Cada equipo tiene una carpeta con su nombre (cdavid/, radio7/, D214/...) con:
@@ -259,6 +260,8 @@ httpsServer.listen(HTTPS_PORT, () => {
       `--user-data-dir=${userDataDir}`,
       // Acepta el certificado del propio servidor sin avisos (necesario si es autofirmado)
       `--ignore-certificate-errors-spki-list=${CERT_SPKI}`,
+      // Con 2+ pantallas, el kiosko va a la secundaria (ver kiosk-display.js / KIOSK_DISPLAY)
+      ...kioskDisplayArgs(),
       kioskUrl, // URL al final
     ];
 
