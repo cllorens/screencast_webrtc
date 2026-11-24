@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sender</title>
+  <style>
+    body { font-family: sans-serif; margin: 16px; }
+    video { width: 640px; max-width: 100%; border: 1px solid #ccc; background: #000; }
+    .row { margin: 8px 0; }
+    button { font-size: 1.1em; padding: 8px 16px; }
+    .warn { color: #b45309; }
+    .ok { color: #166534; }
+    .err { color: #b91c1c; }
+  </style>
+</head>
+<body>
+  <h1>Sender</h1>
+
+  <div class="row">
+    <button id="startBtn">Start sharing</button>
+    <button id="stopBtn" disabled>Stop</button>
+  </div>
+
+  <div class="row" id="info"></div>
+
+  <video autoplay playsinline muted></video>
+
+  <script>
+    window.addEventListener("error", (e) => console.error("[window.error]", e.error || e.message));
+    window.addEventListener("unhandledrejection", (e) => console.error("[unhandledrejection]", e.reason));
+
+    const infoEl = document.getElementById("info");
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const video = document.querySelector("video");
+
+    function setInfo(text, cls) {
+      infoEl.className = cls || "";
+      infoEl.textContent = text;
+    }
+
+    console.log("[PAGE] isSecureContext =", window.isSecureContext);
+    console.log("[PAGE] getDisplayMedia =", !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia));
+
+    // ---------- Estado
+    let ws = null;
+    let wsRetryMs = 1000;
+    let pc = null;
+    let stream = null;
+    let mode = null;
+    let sharing = false;        // el usuario ha pulsado Start y no ha parado
+    let currentSid = null;      // id de la negociación en curso
+    let sidCounter = 0;
+
+    // ---------- WebSocket (con reconexión)
+    const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}`;
+
+    function sendWs(obj) {
+      if (ws && ws.readyState === WebSocket.OPEN) { ws.send(JSON.stringify(obj)); return true; }
+      return false;
+    }
+
+    function connectWs() {
+      console.log("[WS] Connecting to", wsUrl);
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        console.log("✅ [WS] Connected");
+        wsRetryMs = 1000;
+        if (sharing) {
+          setInfo("Reconnected to server, resuming…", "warn");
+          sendWs({ type: "sender" }); // el servidor responderá con receiver-ready y renegociamos
+        } else {
+          setInfo("Ready. Press Start sharing.", "ok");
+        }
+      };
+
+      ws.onerror = (err) => console.error("❌ [WS] Error", err);
+
+      ws.onclose = (ev) => {
+        console.warn("⚠️ [WS] Closed", ev.code, ev.reason);
+        setInfo(`Connection to server lost (${ev.code}). Retrying…`, "err");
+        setTimeout(connectWs, wsRetryMs);
+        wsRetryMs = Math.min(wsRetryMs * 2, 10000);
+      };
+
+      ws.onmessage = async ({ data }) => {
+        let msg;
+        try { msg = JSON.parse(data); }
+        catch (e) { console.error("❌ [WS] JSON parse error:", e); return; }
+
+        try {
+          switch (msg.type) {
+            case "registered":
+              setInfo("Waiting for the projector…", "warn");
+              return;
+            case "kicked":
+              stopSharing("Another device started sharing on the projector.", "warn");
+              return;
+            case "receiver-ready":
+            case "request-offer":
+              if (sharing && stream) await negotiate();
+              return;
+            case "peer-left":
+              closePc();
+              if (sharing) setInfo("Projector disconnected. Waiting for it to come back…", "warn");
+              return;
+          }
+
+          if (msg.answer) {
+            if (!pc || msg.sid !== currentSid) return; // respuesta de una negociación vieja
+            console.log("[PC] Setting remote description (answer)…");
+            await pc.setRemoteDescription(msg.answer);
+          } else if (msg.candidate) {
+            if (!pc || msg.sid !== currentSid) return;
+            try { await pc.addIceCandidate(msg.candidate); }
+            catch (e) { console.warn("[PC] addIceCandidate failed (ignored):", e); }
+          }
+        } catch (e) {
+          console.error("❌ [PC] Error applying signaling message:", e);
+        }
+      };
+    }
+
+    // ---------- WebRTC
+    function closePc() {
+      if (pc) {
+        pc.onicecandidate = pc.onconnectionstatechange = pc.oniceconnectionstatechange = null;
+        try { pc.close(); } catch {}
+      }
+      pc = null;
+      currentSid = null;
+    }
+
+    async function negotiate() {
+      closePc();
+      const sid = `${Date.now().toString(36)}-${++sidCounter}`;
+      currentSid = sid;
+
+      const p = new RTCPeerConnection({
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+      });
+      pc = p;
+
+      p.onconnectionstatechange = () => {
+        console.log("[PC] connectionState =", p.connectionState);
+        if (pc !== p) return;
+        if (p.connectionState === "connected") setInfo(`Sharing on the projector (${mode}).`, "ok");
+        else if (p.connectionState === "failed") setInfo("Connection to projector failed. Retrying…", "err");
+      };
+      p.oniceconnectionstatechange = () => console.log("[PC] iceConnectionState =", p.iceConnectionState);
+      p.onicecandidate = (e) => {
+        if (e.candidate) sendWs({ candidate: e.candidate, sid });
+      };
+
+      stream.getTracks().forEach((track) => p.addTrack(track, stream));
+
+      const offer = await p.createOffer();
+      await p.setLocalDescription(offer);
+      if (pc !== p) return; // otra negociación ha empezado mientras tanto
+      sendWs({ offer: p.localDescription, sid });
+      console.log("[WS] Offer sent sid=", sid);
+      setInfo("Connecting to the projector…", "warn");
+    }
+
+    // Estadísticas periódicas para ver si sale vídeo
+    setInterval(async () => {
+      if (!pc || pc.connectionState !== "connected") return;
+      const stats = await pc.getStats();
+      stats.forEach((r) => {
+        if (r.type === "outbound-rtp" && r.kind === "video") {
+          console.log("[STATS] bytesSent=", r.bytesSent, "framesEncoded=", r.framesEncoded,
+                      "size=", `${r.frameWidth}x${r.frameHeight}`, "fps=", r.framesPerSecond);
+        }
+      });
+    }, 5000);
+
+    // ---------- Captura: pantalla completa con audio; cámara solo si no hay captura de pantalla (móviles)
+    async function getMediaStream() {
+      if (!navigator.mediaDevices) {
+        throw new Error("navigator.mediaDevices is not available. Use HTTPS (secure context).");
+      }
+
+      if (typeof navigator.mediaDevices.getDisplayMedia === "function") {
+        mode = "screen";
+        // Las opciones son sugerencias: el navegador siempre muestra su diálogo,
+        // pero con "Pantalla completa" y "Compartir audio del sistema" preseleccionados.
+        const s = await navigator.mediaDevices.getDisplayMedia({
+          video: { displaySurface: "monitor", frameRate: { ideal: 30, max: 30 } },
+          audio: true,
+          systemAudio: "include",
+          selfBrowserSurface: "exclude",
+          surfaceSwitching: "include",
+          monitorTypeSurfaces: "include",
+        });
+        // Prioriza la nitidez del texto (diapositivas, código) sobre los fps
+        s.getVideoTracks().forEach((t) => { if ("contentHint" in t) t.contentHint = "detail"; });
+        return s;
+      }
+
+      if (typeof navigator.mediaDevices.getUserMedia === "function") {
+        mode = "camera";
+        // Sin micrófono: el micro saldría por los altavoces del proyector (acople)
+        const s = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "environment" },
+          audio: false,
+        });
+        s.getVideoTracks().forEach((t) => { if ("contentHint" in t) t.contentHint = "motion"; });
+        return s;
+      }
+
+      throw new Error("This browser cannot capture the screen or the camera.");
+    }
+
+    function setControls(active) {
+      startBtn.disabled = active;
+      stopBtn.disabled = !active;
+    }
+
+    async function startSharing() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        setInfo("Not connected to the server yet. Wait a second and try again.", "warn");
+        return;
+      }
+
+      setControls(true);
+      try {
+        setInfo("Choose what to share in the browser dialog…", "warn");
+        stream = await getMediaStream();
+        console.log("[MEDIA] Got stream. tracks=", stream.getTracks().map((t) => `${t.kind}:${t.label}`));
+        if (mode === "screen" && stream.getAudioTracks().length === 0) {
+          console.warn("[MEDIA] No audio track (the user unticked audio, or the OS does not support it).");
+        }
+        video.srcObject = stream;
+
+        // Si el usuario para desde la barra del navegador ("Dejar de compartir")
+        stream.getVideoTracks().forEach((track) => {
+          track.onended = () => stopSharing("Sharing stopped from the browser.", "warn");
+        });
+
+        sharing = true;
+        sendWs({ type: "sender" }); // el servidor responde "registered" + "receiver-ready" → negotiate()
+      } catch (err) {
+        console.error("❌ [MEDIA] Failed to start:", err);
+        if (err && err.name === "NotAllowedError") {
+          setInfo("Sharing was cancelled.", "warn");
+        } else {
+          setInfo(String((err && err.message) || err), "err");
+        }
+        stopSharing(null);
+      }
+    }
+
+    function stopSharing(message = "Stopped.", cls = "warn") {
+      const wasSharing = sharing;
+      sharing = false;
+      if (stream) {
+        stream.getTracks().forEach((t) => { t.onended = null; t.stop(); });
+        stream = null;
+      }
+      closePc();
+      video.srcObject = null;
+      if (wasSharing) sendWs({ type: "stopped" }); // el proyector vuelve a mostrar el QR
+      setControls(false);
+      if (message) setInfo(message, cls);
+      console.log("[APP] Sharing stopped.");
+    }
+
+    startBtn.addEventListener("click", startSharing);
+    stopBtn.addEventListener("click", () => stopSharing());
+
+    if (!window.isSecureContext) {
+      setInfo("Warning: Not a secure context. Capture APIs require HTTPS.", "warn");
+    }
+
+    connectWs();
+  </script>
+</body>
+</html>

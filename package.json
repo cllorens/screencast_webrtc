@@ -1,0 +1,15 @@
+{
+  "name": "webrtc-screen-share",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Proyección inalámbrica de la pantalla de portátiles a un PC con proyector mediante WebRTC",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/server.test.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.18.2"
+  }
+}

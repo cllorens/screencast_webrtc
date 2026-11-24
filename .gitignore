@@ -1,0 +1,10 @@
+# Claves privadas y contraseñas de los certificados (NUNCA al repositorio)
+privateKey.pem
+pass.txt
+*.key
+*.pfx
+*.p12
+*.csr
+
+# Dependencias (se instalan con npm install)
+node_modules/

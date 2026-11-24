@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Receiver</title>
+  <style>
+    html, body { margin:0; padding:0; height:100%; width:100%; background:black; overflow:hidden; cursor:none; }
+    video { width:100%; height:100%; object-fit:contain; background:black; }
+
+    #overlay{
+      position:fixed; inset:0; display:flex;
+      align-items:center; justify-content:center;
+      background:rgba(0,0,0,0.85); color:#fff; z-index:9999;
+      font-family:system-ui, Arial, sans-serif;
+    }
+    #overlay .box{
+      max-width:900px; width:calc(100% - 40px);
+      padding:22px; border:1px solid rgba(255,255,255,0.15);
+      border-radius:14px; background:rgba(20,20,20,0.75);
+      display:grid; grid-template-columns:1fr 260px; gap:18px; align-items:center;
+    }
+    #overlay h1{ margin:0 0 10px 0; font-size:22px; font-weight:650; }
+    #overlay .hint{ opacity:.9; margin:0 0 12px 0; line-height:1.35; }
+    #overlay .row{ margin:10px 0; }
+    #overlay .label{ opacity:.75; font-size:12px; margin-bottom:6px; }
+    #overlay .url{
+      display:inline-block; padding:8px 10px; border-radius:10px;
+      background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.12);
+      font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      word-break:break-all;
+    }
+    #overlay .exit{ font-size:18px; font-weight:650; opacity:.85; }
+    #overlay .status{
+      opacity:.6; font-size:12px; margin-top:12px; white-space:pre-wrap;
+      font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    #qr{
+      width:260px; height:260px; display:grid; place-items:center;
+      background:#fff; border-radius:12px; overflow:hidden; color:#000;
+    }
+    #qr canvas{ width:100% !important; height:100% !important; }
+    @media (max-width:760px){
+      #overlay .box{ grid-template-columns:1fr; }
+      #qr{ width:220px; height:220px; margin:0 auto; }
+    }
+  </style>
+</head>
+<body>
+  <video autoplay playsinline></video>
+
+  <div id="overlay">
+    <div class="box">
+      <div>
+        <h1 id="title">Waiting for a sender…</h1>
+        <p class="hint">Open this URL on the device that will share the screen (or scan the QR):</p>
+
+        <div class="row">
+          <div class="label">Sender URL</div>
+          <div class="url" id="senderUrl"></div>
+        </div>
+
+        <div class="row exit">ALT+F4 to exit</div>
+
+        <div class="status" id="status"></div>
+      </div>
+
+      <div>
+        <div class="label">QR (Sender URL)</div>
+        <div id="qr"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/vendor/qrcode.min.js"></script>
+  <script>
+    window.addEventListener("error", (e) => console.error("[window.error]", e.error || e.message));
+    window.addEventListener("unhandledrejection", (e) => console.error("[unhandledrejection]", e.reason));
+
+    const video = document.querySelector("video");
+    const overlay = document.getElementById("overlay");
+    const titleEl = document.getElementById("title");
+    const senderUrlEl = document.getElementById("senderUrl");
+    const statusEl = document.getElementById("status");
+    const qrEl = document.getElementById("qr");
+
+    const token = new URLSearchParams(location.search).get("token") || "";
+    const base = `${location.protocol}//${location.host}`;
+
+    const DISCONNECT_GRACE_MS = 5000;   // margen para que ICE se recupere solo
+    const REOFFER_DELAY_MS = 1500;      // espera antes de pedir una oferta nueva
+
+    let ws = null;
+    let wsRetryMs = 1000;
+    let stopReconnecting = false;
+
+    let pc = null;
+    let currentSid = null;
+    let disconnectTimer = null;
+    let reofferTimer = null;
+
+    // ---------- UI
+    function showOverlay(title) {
+      titleEl.textContent = title;
+      overlay.style.display = "flex";
+    }
+    function hideOverlay() {
+      overlay.style.display = "none";
+    }
+    function wsStateName() {
+      if (!ws) return "NONE";
+      return ["CONNECTING", "OPEN", "CLOSING", "CLOSED"][ws.readyState];
+    }
+    function setStatus(extra = "") {
+      statusEl.textContent =
+        `WS: ${wsStateName()}\n` +
+        (pc ? `PC: connection=${pc.connectionState} ice=${pc.iceConnectionState} signaling=${pc.signalingState}\n` : "PC: none\n") +
+        extra;
+    }
+
+    function renderSenderInfo() {
+      const senderUrl = `${base}/`;
+      senderUrlEl.textContent = base;
+      qrEl.innerHTML = "";
+      if (!window.QRCode) { qrEl.textContent = "QR library not loaded"; return; }
+      QRCode.toCanvas(senderUrl, { margin: 1, width: 260 }, (err, canvas) => {
+        if (err) console.error("[QR] error:", err);
+        else qrEl.appendChild(canvas);
+      });
+    }
+
+    // ---------- WebRTC (una RTCPeerConnection nueva por cada oferta)
+    function resetPc() {
+      clearTimeout(disconnectTimer);
+      clearTimeout(reofferTimer);
+      if (pc) {
+        pc.ontrack = pc.onicecandidate = pc.oniceconnectionstatechange = pc.onconnectionstatechange = null;
+        try { pc.close(); } catch {}
+      }
+      pc = null;
+      currentSid = null;
+      video.srcObject = null;
+      setStatus();
+    }
+
+    // La conexión se ha caído: pedimos al emisor que vuelva a negociar
+    function recover(reason) {
+      console.warn("[PC] recovering:", reason);
+      resetPc();
+      showOverlay(`Connection lost (${reason}). Reconnecting…`);
+      reofferTimer = setTimeout(() => sendWs({ type: "request-offer" }), REOFFER_DELAY_MS);
+    }
+
+    function createPc(sid) {
+      resetPc();
+      currentSid = sid;
+      const p = new RTCPeerConnection({
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+      });
+
+      p.oniceconnectionstatechange = () => {
+        console.log("[PC] ice =", p.iceConnectionState);
+        setStatus();
+        const s = p.iceConnectionState;
+        if (s === "connected" || s === "completed") {
+          clearTimeout(disconnectTimer);
+          if (video.srcObject) hideOverlay();
+        } else if (s === "disconnected") {
+          // Suele ser transitorio (bache de WiFi): damos margen antes de rehacer la conexión
+          clearTimeout(disconnectTimer);
+          disconnectTimer = setTimeout(() => {
+            if (pc === p && p.iceConnectionState === "disconnected") recover("ICE disconnected");
+          }, DISCONNECT_GRACE_MS);
+        } else if (s === "failed") {
+          recover("ICE failed");
+        }
+      };
+
+      p.onconnectionstatechange = () => {
+        console.log("[PC] conn =", p.connectionState);
+        setStatus();
+        if (p.connectionState === "failed") recover("PC failed");
+      };
+
+      p.onicecandidate = (e) => {
+        if (e.candidate) sendWs({ candidate: e.candidate, sid });
+      };
+
+      p.ontrack = (e) => {
+        console.log("[PC] track received:", e.track.kind);
+        if (video.srcObject !== e.streams[0]) {
+          video.srcObject = e.streams[0];
+          video.muted = false;
+          video.play().catch((err) => {
+            // Si el navegador bloquea el autoplay con sonido, al menos mostramos la imagen
+            console.warn("[VIDEO] autoplay with sound blocked, retrying muted:", err);
+            video.muted = true;
+            video.play().catch((e2) => console.warn("[VIDEO] autoplay blocked:", e2));
+          });
+        }
+        // El overlay se oculta cuando ICE conecta (ver oniceconnectionstatechange)
+        if (p.iceConnectionState === "connected" || p.iceConnectionState === "completed") hideOverlay();
+        setStatus("Streaming…");
+      };
+
+      pc = p;
+      return p;
+    }
+
+    async function handleOffer(msg) {
+      console.log("[PC] offer received sid=", msg.sid);
+      showOverlay("Connecting…");
+      const p = createPc(msg.sid);
+      await p.setRemoteDescription(msg.offer);
+      const answer = await p.createAnswer();
+      await p.setLocalDescription(answer);
+      sendWs({ answer: p.localDescription, sid: msg.sid });
+    }
+
+    async function handleCandidate(msg) {
+      // Candidatos de una negociación anterior: se ignoran
+      if (!pc || msg.sid !== currentSid) return;
+      try {
+        await pc.addIceCandidate(msg.candidate);
+      } catch (e) {
+        console.warn("[PC] addIceCandidate failed (ignored):", e);
+      }
+    }
+
+    // ---------- WebSocket (con reconexión, sin recargar la página)
+    function sendWs(obj) {
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+    }
+
+    function connectWs() {
+      ws = new WebSocket(`wss://${location.host}`);
+
+      ws.onopen = () => {
+        console.log("✅ [WS] connected");
+        wsRetryMs = 1000;
+        sendWs({ type: "receiver", token });
+        if (!video.srcObject) showOverlay("Waiting for a sender…");
+        setStatus();
+      };
+
+      ws.onerror = (e) => {
+        console.error("❌ [WS] error:", e);
+        setStatus("WS error");
+      };
+
+      ws.onclose = (e) => {
+        console.warn("⚠️ [WS] closed:", e.code, e.reason);
+        setStatus(`WS closed: ${e.code} ${e.reason || ""}`);
+        if (stopReconnecting) return;
+        // La imagen puede seguir llegando (WebRTC es P2P); solo reintentamos la señalización
+        setTimeout(connectWs, wsRetryMs);
+        wsRetryMs = Math.min(wsRetryMs * 2, 10000);
+      };
+
+      ws.onmessage = async ({ data }) => {
+        let msg;
+        try { msg = JSON.parse(data); }
+        catch (e) { console.error("❌ [WS] invalid JSON:", e); return; }
+
+        try {
+          if (msg.type === "error") {
+            console.error("[WS] server error:", msg.reason);
+            stopReconnecting = true;
+            showOverlay(msg.reason === "receiver-not-allowed"
+              ? "This page must be opened by server.js (kiosk)."
+              : `Server error: ${msg.reason}`);
+          } else if (msg.type === "peer-left" || msg.type === "stopped") {
+            console.log("[WS] sender gone:", msg.type);
+            resetPc();
+            showOverlay("Waiting for a sender…");
+          } else if (msg.offer) {
+            await handleOffer(msg);
+          } else if (msg.candidate) {
+            await handleCandidate(msg);
+          }
+        } catch (e) {
+          console.error("❌ [PC] signaling error:", e);
+          recover("signaling error");
+        } finally {
+          setStatus();
+        }
+      };
+    }
+
+    renderSenderInfo();
+    showOverlay("Connecting to server…");
+    setStatus();
+    connectWs();
+  </script>
+</body>
+</html>
